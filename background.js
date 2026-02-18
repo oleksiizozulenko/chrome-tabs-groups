@@ -17,7 +17,8 @@ const inMemoryState = {
   hostnameColors: null,
   knownHostnameByTabId: new Map(),
   suppressAutoGroupForHostByTabId: new Map(),
-  autoGroupingTabIds: new Set()
+  autoGroupingTabIds: new Set(),
+  groupOperationByKey: new Map()
 };
 
 function isGroupableUrl(urlValue) {
@@ -71,6 +72,26 @@ function hashString(value) {
   return Math.abs(hash);
 }
 
+function getGroupKey(windowId, hostname) {
+  return `${windowId}::${hostname}`;
+}
+
+async function runSerializedGroupOperation(groupKey, operation) {
+  const previousOperation = inMemoryState.groupOperationByKey.get(groupKey) || Promise.resolve();
+
+  const nextOperation = previousOperation
+    .catch(() => {})
+    .then(operation)
+    .finally(() => {
+      if (inMemoryState.groupOperationByKey.get(groupKey) === nextOperation) {
+        inMemoryState.groupOperationByKey.delete(groupKey);
+      }
+    });
+
+  inMemoryState.groupOperationByKey.set(groupKey, nextOperation);
+  return nextOperation;
+}
+
 async function getHostnameColors() {
   if (inMemoryState.hostnameColors) {
     return inMemoryState.hostnameColors;
@@ -114,31 +135,72 @@ async function createOrUpdateGroupForTab(tab, hostname) {
     return;
   }
 
-  inMemoryState.autoGroupingTabIds.add(tab.id);
+  const groupKey = getGroupKey(tab.windowId, hostname);
 
-  try {
-    let matchingGroup = await getGroupForHostname(tab.windowId, hostname);
+  await runSerializedGroupOperation(groupKey, async () => {
+    let latestTab;
 
-    if (matchingGroup && tab.groupId === matchingGroup.id) {
+    try {
+      latestTab = await chrome.tabs.get(tab.id);
+    } catch {
       return;
     }
 
-    if (!matchingGroup) {
-      const createdGroupId = await chrome.tabs.group({ tabIds: [tab.id] });
-      const color = await getOrAssignColor(hostname);
-
-      await chrome.tabGroups.update(createdGroupId, {
-        title: hostname,
-        color,
-        collapsed: true
-      });
-
+    if (!latestTab || latestTab.incognito || latestTab.windowId !== tab.windowId) {
       return;
     }
 
-    await chrome.tabs.group({ groupId: matchingGroup.id, tabIds: [tab.id] });
-  } finally {
-    inMemoryState.autoGroupingTabIds.delete(tab.id);
+    const latestHostname = getHostnameFromTab(latestTab);
+    if (latestHostname !== hostname) {
+      return;
+    }
+
+    inMemoryState.autoGroupingTabIds.add(latestTab.id);
+
+    try {
+      let matchingGroup = await getGroupForHostname(latestTab.windowId, hostname);
+
+      if (matchingGroup && latestTab.groupId === matchingGroup.id) {
+        return;
+      }
+
+      if (!matchingGroup) {
+        const createdGroupId = await chrome.tabs.group({ tabIds: [latestTab.id] });
+        const color = await getOrAssignColor(hostname);
+
+        await chrome.tabGroups.update(createdGroupId, {
+          title: hostname,
+          color,
+          collapsed: true
+        });
+
+        return;
+      }
+
+      await chrome.tabs.group({ groupId: matchingGroup.id, tabIds: [latestTab.id] });
+    } finally {
+      inMemoryState.autoGroupingTabIds.delete(latestTab.id);
+    }
+  });
+}
+
+async function suppressUngroupedTabsForHostname(windowId, hostname) {
+  if (!hostname) {
+    return;
+  }
+
+  const tabs = await chrome.tabs.query({ windowId });
+
+  for (const tab of tabs) {
+    if (tab.id == null || tab.incognito || tab.groupId !== -1) {
+      continue;
+    }
+
+    const tabHostname = getHostnameFromTab(tab);
+    if (tabHostname === hostname) {
+      inMemoryState.suppressAutoGroupForHostByTabId.set(tab.id, hostname);
+      inMemoryState.knownHostnameByTabId.set(tab.id, hostname);
+    }
   }
 }
 
@@ -275,6 +337,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   inMemoryState.autoGroupingTabIds.delete(tabId);
 });
 
-chrome.tabGroups.onRemoved.addListener(() => {
-  // No explicit cleanup needed; Chrome removes tab groups automatically when empty.
+chrome.tabGroups.onRemoved.addListener((removedGroup) => {
+  suppressUngroupedTabsForHostname(removedGroup.windowId, removedGroup.title).catch(() => {});
 });
