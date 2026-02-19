@@ -18,7 +18,9 @@ const inMemoryState = {
   knownHostnameByTabId: new Map(),
   suppressAutoGroupForHostByTabId: new Map(),
   autoGroupingTabIds: new Set(),
-  groupOperationByKey: new Map()
+  groupOperationByKey: new Map(),
+  lastActiveTabIdByGroupId: new Map(),
+  lastKnownCollapsedByGroupId: new Map()
 };
 
 function isGroupableUrl(urlValue) {
@@ -335,8 +337,68 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   inMemoryState.knownHostnameByTabId.delete(tabId);
   inMemoryState.suppressAutoGroupForHostByTabId.delete(tabId);
   inMemoryState.autoGroupingTabIds.delete(tabId);
+  // Clean up last active tab reference if this tab was the recorded last active for its group
+  for (const [groupId, lastTabId] of inMemoryState.lastActiveTabIdByGroupId.entries()) {
+    if (lastTabId === tabId) {
+      inMemoryState.lastActiveTabIdByGroupId.delete(groupId);
+    }
+  }
+});
+
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  try {
+    const tab = await chrome.tabs.get(activeInfo.tabId);
+    if (tab && tab.groupId !== -1) {
+      inMemoryState.lastActiveTabIdByGroupId.set(tab.groupId, tab.id);
+    }
+  } catch {
+    // Tab may have been closed or otherwise unavailable
+  }
 });
 
 chrome.tabGroups.onRemoved.addListener((removedGroup) => {
   suppressUngroupedTabsForHostname(removedGroup.windowId, removedGroup.title).catch(() => {});
+  // Clean up last active tab and collapsed state tracking for this group
+  inMemoryState.lastActiveTabIdByGroupId.delete(removedGroup.id);
+  inMemoryState.lastKnownCollapsedByGroupId.delete(removedGroup.id);
+});
+
+chrome.tabGroups.onUpdated.addListener(async (group) => {
+  // Detect transition from collapsed=true to collapsed=false (group opening/expanding)
+  const wasPreviouslyCollapsed = inMemoryState.lastKnownCollapsedByGroupId.get(group.id);
+  const isNowCollapsed = group.collapsed;
+
+  // Update the record of collapsed state
+  inMemoryState.lastKnownCollapsedByGroupId.set(group.id, isNowCollapsed);
+
+  // If transitioning from collapsed to expanded, ensure at least one tab is active
+  if (wasPreviouslyCollapsed === true && isNowCollapsed === false) {
+    try {
+      // First, try to activate the last known active tab for this group
+      const lastActiveTabId = inMemoryState.lastActiveTabIdByGroupId.get(group.id);
+      if (lastActiveTabId) {
+        try {
+          const lastTab = await chrome.tabs.get(lastActiveTabId);
+          // Verify tab still exists and still belongs to this group
+          if (lastTab && lastTab.groupId === group.id && !lastTab.incognito) {
+            await chrome.tabs.update(lastActiveTabId, { active: true });
+            return;
+          }
+        } catch {
+          // Tab no longer exists or has changed group
+        }
+      }
+
+      // Fallback: find the most recently accessed tab in this group
+      const groupTabs = await chrome.tabs.query({ windowId: group.windowId, groupId: group.id });
+      if (groupTabs.length > 0) {
+        // Sort by lastAccessed descending to get the most recent
+        groupTabs.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
+        const mostRecentTab = groupTabs[0];
+        await chrome.tabs.update(mostRecentTab.id, { active: true });
+      }
+    } catch {
+      // Ignore errors during group expansion tab activation
+    }
+  }
 });
