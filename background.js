@@ -6,7 +6,8 @@ const TAB_GROUP_COLORS = [
   "green",
   "pink",
   "purple",
-  "cyan"
+  "cyan",
+  "orange"
 ];
 
 const STORAGE_KEYS = {
