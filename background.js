@@ -209,25 +209,46 @@ async function createOrUpdateGroupForTab(tab, hostname) {
       return;
     }
 
+    const isActive = Boolean(latestTab.active);
     const color = await getOrAssignColor(hostname);
     let matchingGroup = await getGroupForHostname(latestTab.windowId, hostname);
 
     if (!matchingGroup) {
       const createdGroupId = await chrome.tabs.group({ tabIds: [latestTab.id] });
-      await chrome.tabGroups.update(createdGroupId, { title: hostname, color });
+      await chrome.tabGroups.update(createdGroupId, { title: hostname, color, collapsed: false });
+      if (isActive) {
+        await chrome.tabs.update(latestTab.id, { active: true });
+      }
       return;
     }
 
-    if (matchingGroup.color !== color || matchingGroup.title !== hostname) {
-      await chrome.tabGroups.update(matchingGroup.id, { title: hostname, color });
+    if (matchingGroup.color !== color || matchingGroup.title !== hostname || matchingGroup.collapsed) {
+      await chrome.tabGroups.update(matchingGroup.id, { title: hostname, color, collapsed: false });
       matchingGroup = await getGroupForHostname(latestTab.windowId, hostname);
     }
 
-    if (!matchingGroup || latestTab.groupId === matchingGroup.id) {
+    if (!matchingGroup) {
       return;
     }
 
+    if (latestTab.groupId === matchingGroup.id) {
+      if (isActive && matchingGroup.collapsed) {
+        await chrome.tabGroups.update(matchingGroup.id, { collapsed: false });
+      }
+      if (isActive) {
+        await chrome.tabs.update(latestTab.id, { active: true });
+      }
+      return;
+    }
+
+    if (isActive && matchingGroup.collapsed) {
+      await chrome.tabGroups.update(matchingGroup.id, { collapsed: false });
+    }
+
     await chrome.tabs.group({ groupId: matchingGroup.id, tabIds: [latestTab.id] });
+    if (isActive) {
+      await chrome.tabs.update(latestTab.id, { active: true });
+    }
   });
 }
 
@@ -504,11 +525,12 @@ async function getCurrentActiveHostname(windowId) {
 }
 
 function toGroupItem(record, tabCount, activeHostname) {
+  const isClosed = Boolean(record.toggledOff) && tabCount === 0;
   return {
     windowId: record.windowId,
     hostname: record.hostname,
     pinned: Boolean(record.pinned),
-    toggledOff: Boolean(record.toggledOff),
+    toggledOff: isClosed,
     mruAt: Number(record.mruAt || 0),
     tabCount,
     color: record.color || "grey",
@@ -538,6 +560,10 @@ async function getSidePanelData(windowId) {
 
   for (const record of windowRecords) {
     const tabCount = tabCountByHostname.get(record.hostname) || 0;
+    if (tabCount > 0 && record.toggledOff) {
+      await upsertGroupRecord(windowId, record.hostname, { toggledOff: false });
+      record.toggledOff = false;
+    }
     const item = toGroupItem(record, tabCount, activeHostname);
     if (record.pinned) {
       pinned.push(item);
@@ -584,9 +610,17 @@ async function handlePotentialHostnameChange(tabId, changeInfo, tab) {
     return;
   }
 
-  await createOrUpdateGroupForTab(tab, hostname);
   await upsertGroupRecord(tab.windowId, hostname, { toggledOff: false });
-  await reconcileWindow(tab.windowId);
+
+  try {
+    await createOrUpdateGroupForTab(tab, hostname);
+  } catch {
+  }
+
+  try {
+    await reconcileWindow(tab.windowId);
+  } catch {
+  }
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -651,6 +685,9 @@ chrome.tabGroups.onRemoved.addListener((group) => {
 chrome.tabGroups.onUpdated.addListener((group) => {
   if (group.windowId == null) {
     return;
+  }
+  if (group.title) {
+    upsertGroupRecord(group.windowId, group.title, { toggledOff: false }).catch(() => {});
   }
   reconcileWindow(group.windowId).catch(() => {});
 });
