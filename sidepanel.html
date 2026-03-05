@@ -25,6 +25,18 @@
         <p id="recent-empty" class="section-empty" hidden>No recent groups</p>
       </section>
 
+      <section>
+        <h2 class="section-title">Manual Groups</h2>
+        <form id="rule-form" class="rule-form">
+          <input id="rule-hostname-or-url" type="text" placeholder="Hostname or URL (e.g. bitbucket.org)" required />
+          <input id="rule-path-prefix" type="text" placeholder="Path prefix (optional, default /)" />
+          <input id="rule-group-name" type="text" placeholder="Group name" required />
+          <button type="submit">Add Rule</button>
+        </form>
+        <div id="rules-list" class="rules-list"></div>
+        <p id="rules-empty" class="section-empty" hidden>No manual rules</p>
+      </section>
+
       <div id="empty-state" class="empty-state" hidden>No groups yet</div>
       <div id="status" class="status" aria-live="polite"></div>
     </main>

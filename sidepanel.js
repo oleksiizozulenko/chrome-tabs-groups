@@ -3,7 +3,10 @@ const MESSAGE_TYPES = {
   openGroup: "OPEN_GROUP",
   toggleGroup: "TOGGLE_GROUP",
   setPinned: "SET_PINNED",
-  moveGroup: "MOVE_GROUP"
+  moveGroup: "MOVE_GROUP",
+  getManualGroupRules: "GET_MANUAL_GROUP_RULES",
+  addManualGroupRule: "ADD_MANUAL_GROUP_RULE",
+  removeManualGroupRule: "REMOVE_MANUAL_GROUP_RULE"
 };
 
 const COLOR_BY_NAME = {
@@ -234,6 +237,83 @@ function renderGroupList(element, groups, windows, currentWindowId) {
   }
 }
 
+function renderRulesList(rules) {
+  const rulesList = document.getElementById("rules-list");
+  const rulesEmpty = document.getElementById("rules-empty");
+  if (!rulesList || !rulesEmpty) {
+    return;
+  }
+
+  rulesList.innerHTML = "";
+
+  for (const rule of rules) {
+    const row = document.createElement("article");
+    row.className = "rule-row";
+
+    const text = document.createElement("div");
+    text.className = "rule-text";
+    text.title = `${rule.hostname}${rule.pathPrefix} → ${rule.groupName}`;
+    text.textContent = `${rule.hostname}${rule.pathPrefix} → ${rule.groupName}`;
+
+    const removeButton = createButton("Remove", () => {
+      runAction("Remove rule", async () => {
+        const response = await sendMessage(MESSAGE_TYPES.removeManualGroupRule, { ruleId: rule.id });
+        if (!response?.ok) {
+          throw new Error("Rule remove failed");
+        }
+
+        await Promise.all([refresh(), refreshRules()]);
+      }).catch(() => {});
+    });
+
+    row.appendChild(text);
+    row.appendChild(removeButton);
+    rulesList.appendChild(row);
+  }
+
+  rulesEmpty.hidden = rules.length > 0;
+}
+
+async function refreshRules() {
+  const response = await sendMessage(MESSAGE_TYPES.getManualGroupRules);
+  if (!response?.ok || !Array.isArray(response.rules)) {
+    renderRulesList([]);
+    return;
+  }
+  renderRulesList(response.rules);
+}
+
+function setupRuleForm() {
+  const form = document.getElementById("rule-form");
+  const hostnameInput = document.getElementById("rule-hostname-or-url");
+  const pathPrefixInput = document.getElementById("rule-path-prefix");
+  const groupNameInput = document.getElementById("rule-group-name");
+
+  if (!form || !hostnameInput || !pathPrefixInput || !groupNameInput) {
+    return;
+  }
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+
+    runAction("Add rule", async () => {
+      const response = await sendMessage(MESSAGE_TYPES.addManualGroupRule, {
+        hostnameOrUrl: hostnameInput.value,
+        pathPrefix: pathPrefixInput.value,
+        groupName: groupNameInput.value
+      });
+
+      if (!response?.ok) {
+        throw new Error("Rule add failed");
+      }
+
+      pathPrefixInput.value = "";
+      groupNameInput.value = "";
+      await Promise.all([refresh(), refreshRules()]);
+    }).catch(() => {});
+  });
+}
+
 async function refresh() {
   const currentWindowId = await getCurrentWindowId();
   const response = await sendMessage(MESSAGE_TYPES.getSidePanelData, { windowId: currentWindowId });
@@ -270,4 +350,5 @@ chrome.tabGroups.onUpdated.addListener(debounceRefresh);
 chrome.tabGroups.onRemoved.addListener(debounceRefresh);
 chrome.windows.onFocusChanged.addListener(debounceRefresh);
 
-refresh().catch(() => {});
+setupRuleForm();
+Promise.all([refresh(), refreshRules()]).catch(() => {});

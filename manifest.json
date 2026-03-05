@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Auto Tab Grouper",
+  "name": "Auto Tab Grouper - BETA",
   "version": "0.1.0",
-  "description": "Automatically groups tabs by hostname per window with MRU and pin controls.",
+  "description": "Automatically groups tabs by hostname per window with MRU and pin controls. THIS EXTENSION IS FOR BETA TESTING",
   "permissions": ["tabs", "tabGroups", "storage", "sidePanel"],
   "action": {
     "default_title": "Tab Groups Bar"

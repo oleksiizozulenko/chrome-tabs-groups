@@ -142,6 +142,60 @@ body {
   opacity: 0.7;
 }
 
+.rule-form {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.rule-form input,
+.rule-form button {
+  font-size: 12px;
+  border-radius: 7px;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in oklab, currentColor 20%, transparent);
+  background: transparent;
+}
+
+.rule-form button {
+  cursor: pointer;
+}
+
+.rules-list {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rule-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid color-mix(in oklab, currentColor 20%, transparent);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.rule-text {
+  min-width: 0;
+  font-size: 12px;
+  opacity: 0.9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rule-row button {
+  font-size: 12px;
+  border-radius: 6px;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in oklab, currentColor 20%, transparent);
+  background: transparent;
+  cursor: pointer;
+}
+
 .empty-state {
   margin-top: 2px;
   font-size: 13px;

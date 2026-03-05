@@ -2,7 +2,8 @@ const TAB_GROUP_COLORS = ["grey", "blue", "red", "yellow", "green", "pink", "pur
 
 const STORAGE_KEYS = {
   hostnameColors: "hostnameColors",
-  groupRecords: "groupRecords"
+  groupRecords: "groupRecords",
+  manualGroupRules: "manualGroupRules"
 };
 
 const MESSAGE_TYPES = {
@@ -10,13 +11,17 @@ const MESSAGE_TYPES = {
   openGroup: "OPEN_GROUP",
   toggleGroup: "TOGGLE_GROUP",
   setPinned: "SET_PINNED",
-  moveGroup: "MOVE_GROUP"
+  moveGroup: "MOVE_GROUP",
+  getManualGroupRules: "GET_MANUAL_GROUP_RULES",
+  addManualGroupRule: "ADD_MANUAL_GROUP_RULE",
+  removeManualGroupRule: "REMOVE_MANUAL_GROUP_RULE"
 };
 
 const inMemoryState = {
   hostnameColors: null,
   groupRecords: null,
-  knownHostnameByTabId: new Map(),
+  manualGroupRules: null,
+  knownGroupNameByTabId: new Map(),
   groupOperationByKey: new Map(),
   duplicateCleanupDoneByWindowId: new Set()
 };
@@ -40,20 +45,186 @@ function isGroupableUrl(urlValue) {
   }
 }
 
-function getHostnameFromUrl(urlValue) {
+function parseGroupableUrl(urlValue) {
   if (!isGroupableUrl(urlValue)) {
     return null;
   }
 
   try {
-    return new URL(urlValue).hostname;
+    return new URL(urlValue);
   } catch {
     return null;
   }
 }
 
+function getHostnameFromUrl(urlValue) {
+  const parsed = parseGroupableUrl(urlValue);
+  return parsed ? parsed.hostname : null;
+}
+
 function getHostnameFromTab(tab) {
   return getHostnameFromUrl(tab.url || tab.pendingUrl);
+}
+
+function normalizePathPrefix(pathPrefix) {
+  if (!pathPrefix || typeof pathPrefix !== "string") {
+    return "/";
+  }
+
+  const withLeadingSlash = pathPrefix.startsWith("/") ? pathPrefix : `/${pathPrefix}`;
+  return withLeadingSlash.replace(/\/+$/, "") || "/";
+}
+
+function normalizeGroupName(groupName) {
+  if (!groupName || typeof groupName !== "string") {
+    return "";
+  }
+  return groupName.trim();
+}
+
+function parseHostnameInput(hostnameOrUrl) {
+  if (!hostnameOrUrl || typeof hostnameOrUrl !== "string") {
+    return null;
+  }
+
+  const trimmed = hostnameOrUrl.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const fromUrl = getHostnameFromUrl(trimmed);
+  if (fromUrl) {
+    return fromUrl;
+  }
+
+  if (/^[a-z0-9.-]+$/i.test(trimmed) && trimmed.includes(".")) {
+    return trimmed.toLowerCase();
+  }
+
+  return null;
+}
+
+function doesRuleMatchParsedUrl(parsedUrl, rule) {
+  if (!parsedUrl || !rule) {
+    return false;
+  }
+
+  if (parsedUrl.hostname !== rule.hostname) {
+    return false;
+  }
+
+  if (rule.pathPrefix === "/") {
+    return true;
+  }
+
+  const pathname = parsedUrl.pathname || "/";
+  return pathname === rule.pathPrefix || pathname.startsWith(`${rule.pathPrefix}/`);
+}
+
+async function getManualGroupRules() {
+  if (inMemoryState.manualGroupRules) {
+    return inMemoryState.manualGroupRules;
+  }
+
+  const loaded = await chrome.storage.local.get(STORAGE_KEYS.manualGroupRules);
+  const rawRules = Array.isArray(loaded[STORAGE_KEYS.manualGroupRules]) ? loaded[STORAGE_KEYS.manualGroupRules] : [];
+
+  inMemoryState.manualGroupRules = rawRules
+    .map((rule) => {
+      const hostname = rule?.hostname || "";
+      const groupName = normalizeGroupName(rule?.groupName);
+      const pathPrefix = normalizePathPrefix(rule?.pathPrefix);
+
+      if (!hostname || !groupName) {
+        return null;
+      }
+
+      return {
+        id: rule?.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        hostname,
+        pathPrefix,
+        groupName
+      };
+    })
+    .filter(Boolean);
+
+  return inMemoryState.manualGroupRules;
+}
+
+async function saveManualGroupRules() {
+  if (!inMemoryState.manualGroupRules) {
+    return;
+  }
+
+  await chrome.storage.local.set({ [STORAGE_KEYS.manualGroupRules]: inMemoryState.manualGroupRules });
+}
+
+async function resolveGroupNameFromUrl(urlValue) {
+  const parsed = parseGroupableUrl(urlValue);
+  if (!parsed) {
+    return null;
+  }
+
+  const rules = await getManualGroupRules();
+  for (const rule of rules) {
+    if (doesRuleMatchParsedUrl(parsed, rule)) {
+      return rule.groupName;
+    }
+  }
+
+  return parsed.hostname;
+}
+
+async function getGroupNameFromTab(tab) {
+  if (!tab) {
+    return null;
+  }
+  return resolveGroupNameFromUrl(tab.url || tab.pendingUrl);
+}
+
+async function addManualGroupRule(ruleInput) {
+  const hostname = parseHostnameInput(ruleInput?.hostnameOrUrl || "");
+  if (!hostname) {
+    throw new Error("Rule hostname/url is invalid");
+  }
+
+  const groupName = normalizeGroupName(ruleInput?.groupName);
+  if (!groupName) {
+    throw new Error("Group name is required");
+  }
+
+  const pathPrefix = normalizePathPrefix(ruleInput?.pathPrefix || "/");
+  const rules = await getManualGroupRules();
+
+  const duplicate = rules.find(
+    (rule) => rule.hostname === hostname && rule.pathPrefix === pathPrefix && rule.groupName === groupName
+  );
+
+  if (!duplicate) {
+    rules.unshift({
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      hostname,
+      pathPrefix,
+      groupName
+    });
+    await saveManualGroupRules();
+  }
+
+  inMemoryState.duplicateCleanupDoneByWindowId.clear();
+  return getManualGroupRules();
+}
+
+async function removeManualGroupRule(ruleId) {
+  const rules = await getManualGroupRules();
+  const nextRules = rules.filter((rule) => rule.id !== ruleId);
+  if (nextRules.length === rules.length) {
+    return rules;
+  }
+
+  inMemoryState.manualGroupRules = nextRules;
+  await saveManualGroupRules();
+  inMemoryState.duplicateCleanupDoneByWindowId.clear();
+  return nextRules;
 }
 
 function hashString(value) {
@@ -190,7 +361,8 @@ async function getGroupForHostname(windowId, hostname) {
       continue;
     }
 
-    if (getHostnameFromTab(tab) !== hostname) {
+    const groupName = await getGroupNameFromTab(tab);
+    if (groupName !== hostname) {
       continue;
     }
 
@@ -233,7 +405,7 @@ async function createOrUpdateGroupForTab(tab, hostname) {
       return;
     }
 
-    const latestHostname = getHostnameFromTab(latestTab);
+    const latestHostname = await getGroupNameFromTab(latestTab);
     if (latestHostname !== hostname) {
       return;
     }
@@ -301,7 +473,8 @@ async function activateByRule(windowId, hostname, lastActiveTabId) {
   if (lastActiveTabId != null) {
     try {
       const tab = await chrome.tabs.get(lastActiveTabId);
-      if (tab && tab.windowId === windowId && getHostnameFromTab(tab) === hostname) {
+      const groupName = await getGroupNameFromTab(tab);
+      if (tab && tab.windowId === windowId && groupName === hostname) {
         await chrome.tabs.update(tab.id, { active: true });
         await upsertGroupRecord(windowId, hostname, { lastActiveTabId: tab.id });
         return tab.id;
@@ -459,7 +632,7 @@ async function mergeDuplicateHostnameGroups(windowId) {
       continue;
     }
 
-    const hostname = getHostnameFromTab(tab);
+    const hostname = await getGroupNameFromTab(tab);
     if (!hostname) {
       continue;
     }
@@ -541,12 +714,12 @@ async function reconcileWindow(windowId) {
       continue;
     }
 
-    const hostname = getHostnameFromTab(tab);
+    const hostname = await getGroupNameFromTab(tab);
     if (!hostname) {
       continue;
     }
 
-    inMemoryState.knownHostnameByTabId.set(tab.id, hostname);
+    inMemoryState.knownGroupNameByTabId.set(tab.id, hostname);
 
     if (!byHostname.has(hostname)) {
       byHostname.set(hostname, []);
@@ -617,7 +790,7 @@ async function getCurrentActiveHostname(windowId) {
   if (!activeTab) {
     return null;
   }
-  return getHostnameFromTab(activeTab);
+  return getGroupNameFromTab(activeTab);
 }
 
 function toGroupItem(record, tabCount, activeHostname) {
@@ -642,7 +815,7 @@ async function getSidePanelData(windowId) {
   const tabCountByHostname = new Map();
 
   for (const tab of tabs) {
-    const hostname = getHostnameFromTab(tab);
+    const hostname = await getGroupNameFromTab(tab);
     if (!hostname) {
       continue;
     }
@@ -691,15 +864,16 @@ async function handlePotentialHostnameChange(tabId, changeInfo, tab) {
     return;
   }
 
-  const candidateHostnameFromUrl = getHostnameFromUrl(changeInfo.url);
-  const candidateHostnameFromPending = getHostnameFromUrl(changeInfo.pendingUrl);
-  const hostname = candidateHostnameFromUrl || candidateHostnameFromPending || getHostnameFromTab(tab);
+  const hostname =
+    (await resolveGroupNameFromUrl(changeInfo.url)) ||
+    (await resolveGroupNameFromUrl(changeInfo.pendingUrl)) ||
+    (await getGroupNameFromTab(tab));
   if (!hostname) {
     return;
   }
 
-  const previousHostname = inMemoryState.knownHostnameByTabId.get(tabId);
-  inMemoryState.knownHostnameByTabId.set(tabId, hostname);
+  const previousHostname = inMemoryState.knownGroupNameByTabId.get(tabId);
+  inMemoryState.knownGroupNameByTabId.set(tabId, hostname);
 
   const shouldGroupNow = previousHostname !== hostname || Boolean(changeInfo.url) || Boolean(changeInfo.pendingUrl) || changeInfo.status === "complete";
   if (!shouldGroupNow) {
@@ -754,14 +928,14 @@ chrome.tabs.onReplaced.addListener(async (addedTabId) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
-  inMemoryState.knownHostnameByTabId.delete(tabId);
+  inMemoryState.knownGroupNameByTabId.delete(tabId);
   reconcileWindow(removeInfo.windowId).catch(() => {});
 });
 
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
-    const hostname = getHostnameFromTab(tab);
+    const hostname = await getGroupNameFromTab(tab);
     if (!hostname || tab.windowId == null) {
       return;
     }
@@ -833,6 +1007,30 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === MESSAGE_TYPES.moveGroup) {
       await moveGroup(message.sourceWindowId, message.hostname, message.targetWindowId);
       sendResponse({ ok: true });
+      return;
+    }
+
+    if (message.type === MESSAGE_TYPES.getManualGroupRules) {
+      const rules = await getManualGroupRules();
+      sendResponse({ ok: true, rules });
+      return;
+    }
+
+    if (message.type === MESSAGE_TYPES.addManualGroupRule) {
+      const rules = await addManualGroupRule({
+        hostnameOrUrl: message.hostnameOrUrl,
+        pathPrefix: message.pathPrefix,
+        groupName: message.groupName
+      });
+      await reconcileAllNormalWindows();
+      sendResponse({ ok: true, rules });
+      return;
+    }
+
+    if (message.type === MESSAGE_TYPES.removeManualGroupRule) {
+      const rules = await removeManualGroupRule(message.ruleId);
+      await reconcileAllNormalWindows();
+      sendResponse({ ok: true, rules });
       return;
     }
 

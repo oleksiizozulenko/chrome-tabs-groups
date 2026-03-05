@@ -5,6 +5,7 @@ Automatically groups Chrome tabs by exact hostname per window and exposes a side
 ## Features
 
 - Automatic grouping by exact hostname (for example, `github.com`, `docs.google.com`).
+- Manual grouping rules by hostname + path prefix, with custom group names.
 - Stable hostname color assignment persisted in `chrome.storage.local`.
 - Window-scoped group isolation (same hostname in different windows is tracked separately).
 - Side panel UI with:
@@ -19,6 +20,25 @@ Automatically groups Chrome tabs by exact hostname per window and exposes a side
 	1. Activate `lastActiveTabId` if still valid.
 	2. Otherwise activate the leftmost tab in the group.
 - Moving a group merges with destination hostname group when it already exists.
+
+## Manual Group Rules
+
+Use the **Manual Groups** section in the side panel to create rules:
+
+- **Hostname or URL**: Domain to match (for example, `bitbucket.org`).
+- **Path prefix**: Optional path scope (for example, `/kinorating`, `/golumtan4ik`).
+- **Group name**: Final group title to use.
+
+Matching uses `hostname + path prefix`. If no rule matches, grouping falls back to exact hostname.
+
+### Example: merge multiple Bitbucket paths into one group
+
+Add two rules with the same group name:
+
+1. `bitbucket.org` + `/kinorating` → `bitbucket.org`
+2. `bitbucket.org` + `/golumtan4ik` → `bitbucket.org`
+
+Both URLs will then be grouped together under `bitbucket.org`.
 
 ## MRU Behavior
 
