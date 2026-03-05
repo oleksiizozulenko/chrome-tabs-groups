@@ -65,6 +65,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.EXTENSION_NAME }}
+          path: .
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
