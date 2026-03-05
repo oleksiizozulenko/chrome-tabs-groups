@@ -17,11 +17,11 @@ jobs:
       - name: Create extension zip
         run: |
           zip -r chrome-tabs-group-oz.zip . \
-            -x "*.git*"
-            -x "node_modules/*"
-            -x ".vscode/*"
-            -x "tests/*"
-            -x ".github/*"
+            -x "*.git*" \
+            -x "node_modules/*" \
+            -x ".vscode/*" \
+            -x "tests/*" \
+            -x ".github/*" \
             -x ".idea/*"
 
       - name: Upload artifact
