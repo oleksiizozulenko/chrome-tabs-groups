@@ -17,7 +17,8 @@ const inMemoryState = {
   hostnameColors: null,
   groupRecords: null,
   knownHostnameByTabId: new Map(),
-  groupOperationByKey: new Map()
+  groupOperationByKey: new Map(),
+  duplicateCleanupDoneByWindowId: new Set()
 };
 
 function getGroupKey(windowId, hostname) {
@@ -181,6 +182,34 @@ async function deleteGroupRecord(windowId, hostname) {
 }
 
 async function getGroupForHostname(windowId, hostname) {
+  const tabs = await chrome.tabs.query({ windowId });
+  const hostnameGroupTabCount = new Map();
+
+  for (const tab of tabs) {
+    if (tab.groupId == null || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) {
+      continue;
+    }
+
+    if (getHostnameFromTab(tab) !== hostname) {
+      continue;
+    }
+
+    hostnameGroupTabCount.set(tab.groupId, (hostnameGroupTabCount.get(tab.groupId) || 0) + 1);
+  }
+
+  if (hostnameGroupTabCount.size > 0) {
+    const sortedGroupIds = Array.from(hostnameGroupTabCount.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([groupId]) => groupId);
+
+    for (const groupId of sortedGroupIds) {
+      try {
+        return await chrome.tabGroups.get(groupId);
+      } catch {
+      }
+    }
+  }
+
   const groups = await chrome.tabGroups.query({ windowId });
   return groups.find((group) => group.title === hostname) || null;
 }
@@ -421,6 +450,68 @@ async function moveGroup(sourceWindowId, hostname, targetWindowId) {
   await reconcileWindow(targetWindowId);
 }
 
+async function mergeDuplicateHostnameGroups(windowId) {
+  const tabs = await chrome.tabs.query({ windowId });
+  const groupedTabsByHostname = new Map();
+
+  for (const tab of tabs) {
+    if (tab.id == null || tab.groupId == null || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) {
+      continue;
+    }
+
+    const hostname = getHostnameFromTab(tab);
+    if (!hostname) {
+      continue;
+    }
+
+    if (!groupedTabsByHostname.has(hostname)) {
+      groupedTabsByHostname.set(hostname, []);
+    }
+    groupedTabsByHostname.get(hostname).push(tab);
+  }
+
+  for (const [hostname, hostnameTabs] of groupedTabsByHostname.entries()) {
+    const tabsByGroupId = new Map();
+
+    for (const tab of hostnameTabs) {
+      if (!tabsByGroupId.has(tab.groupId)) {
+        tabsByGroupId.set(tab.groupId, []);
+      }
+      tabsByGroupId.get(tab.groupId).push(tab);
+    }
+
+    if (tabsByGroupId.size <= 1) {
+      continue;
+    }
+
+    const [targetGroupId] = Array.from(tabsByGroupId.entries())
+      .sort((a, b) => b[1].length - a[1].length)
+      .map(([groupId]) => groupId);
+
+    for (const [groupId, groupedTabs] of tabsByGroupId.entries()) {
+      if (groupId === targetGroupId) {
+        continue;
+      }
+
+      const tabIdsToMove = groupedTabs.map((tab) => tab.id).filter((tabId) => tabId != null);
+      if (!tabIdsToMove.length) {
+        continue;
+      }
+
+      try {
+        await chrome.tabs.group({ groupId: targetGroupId, tabIds: tabIdsToMove });
+      } catch {
+      }
+    }
+
+    const color = await getOrAssignColor(hostname);
+    try {
+      await chrome.tabGroups.update(targetGroupId, { title: hostname, color, collapsed: false });
+    } catch {
+    }
+  }
+}
+
 async function reconcileWindow(windowId) {
   if (windowId == null || windowId === chrome.windows.WINDOW_ID_NONE) {
     return;
@@ -435,6 +526,11 @@ async function reconcileWindow(windowId) {
 
   if (!windowInfo || windowInfo.incognito) {
     return;
+  }
+
+  if (!inMemoryState.duplicateCleanupDoneByWindowId.has(windowId)) {
+    await mergeDuplicateHostnameGroups(windowId);
+    inMemoryState.duplicateCleanupDoneByWindowId.add(windowId);
   }
 
   const tabs = await chrome.tabs.query({ windowId });
@@ -693,6 +789,7 @@ chrome.tabGroups.onUpdated.addListener((group) => {
 });
 
 chrome.windows.onRemoved.addListener(async (windowId) => {
+  inMemoryState.duplicateCleanupDoneByWindowId.delete(windowId);
   const records = await getGroupRecords();
   for (const key of Object.keys(records)) {
     if (records[key]?.windowId === windowId) {
