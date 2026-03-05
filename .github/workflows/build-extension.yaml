@@ -1,0 +1,29 @@
+name: Build Chrome Extension
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create extension zip
+        run: |
+          zip -r chrome-tabs-group-oz.zip . \
+            -x ".git/*" \
+            -x ".github/*" \
+            -x "node_modules/*"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-tabs-group-oz
+          path: chrome-tabs-group-oz.zip
+
