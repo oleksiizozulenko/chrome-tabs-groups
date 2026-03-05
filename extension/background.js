@@ -29,7 +29,8 @@ const inMemoryState = {
 };
 
 function getGroupKey(windowId, groupName) {
-  return `${windowId}::${groupName}`;
+  const normalizedGroupName = normalizeGroupName(groupName || "");
+  return `${windowId}::${normalizedGroupName}`;
 }
 
 function getRecordGroupName(record) {
