@@ -415,25 +415,25 @@ async function deleteGroupRecord(windowId, groupName) {
   await saveGroupRecords();
 }
 
-async function getGroupForHostname(windowId, hostname) {
+async function getGroupForGroupName(windowId, groupName) {
   const tabs = await chrome.tabs.query({ windowId });
-  const hostnameGroupTabCount = new Map();
+  const groupNameTabCount = new Map();
 
   for (const tab of tabs) {
     if (tab.groupId == null || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) {
       continue;
     }
 
-    const groupName = await getGroupNameFromTab(tab);
-    if (groupName !== hostname) {
+    const tabGroupName = await getGroupNameFromTab(tab);
+    if (tabGroupName !== groupName) {
       continue;
     }
 
-    hostnameGroupTabCount.set(tab.groupId, (hostnameGroupTabCount.get(tab.groupId) || 0) + 1);
+    groupNameTabCount.set(tab.groupId, (groupNameTabCount.get(tab.groupId) || 0) + 1);
   }
 
-  if (hostnameGroupTabCount.size > 0) {
-    const sortedGroupIds = Array.from(hostnameGroupTabCount.entries())
+  if (groupNameTabCount.size > 0) {
+    const sortedGroupIds = Array.from(groupNameTabCount.entries())
       .sort((a, b) => b[1] - a[1])
       .map(([groupId]) => groupId);
 
@@ -446,7 +446,7 @@ async function getGroupForHostname(windowId, hostname) {
   }
 
   const groups = await chrome.tabGroups.query({ windowId });
-  return groups.find((group) => group.title === hostname) || null;
+  return groups.find((group) => group.title === groupName) || null;
 }
 
 async function createOrUpdateGroupForTab(tab, groupName) {
@@ -475,7 +475,7 @@ async function createOrUpdateGroupForTab(tab, groupName) {
 
     const isActive = Boolean(latestTab.active);
     const color = await getOrAssignColor(groupName);
-    let matchingGroup = await getGroupForHostname(latestTab.windowId, groupName);
+    let matchingGroup = await getGroupForGroupName(latestTab.windowId, groupName);
 
     if (!matchingGroup) {
       const createdGroupId = await chrome.tabs.group({ tabIds: [latestTab.id] });
@@ -488,7 +488,7 @@ async function createOrUpdateGroupForTab(tab, groupName) {
 
     if (matchingGroup.color !== color || matchingGroup.title !== groupName || matchingGroup.collapsed) {
       await chrome.tabGroups.update(matchingGroup.id, { title: groupName, color, collapsed: false });
-      matchingGroup = await getGroupForHostname(latestTab.windowId, groupName);
+      matchingGroup = await getGroupForGroupName(latestTab.windowId, groupName);
     }
 
     if (!matchingGroup) {
@@ -517,7 +517,7 @@ async function createOrUpdateGroupForTab(tab, groupName) {
 }
 
 async function getOpenTabsForGroupName(windowId, groupName) {
-  const group = await getGroupForHostname(windowId, groupName);
+  const group = await getGroupForGroupName(windowId, groupName);
   if (!group) {
     return [];
   }
