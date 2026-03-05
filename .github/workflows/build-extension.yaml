@@ -1,32 +1,59 @@
 name: Build Chrome Extension
 
+env:
+  EXTENSION_NAME: auto-tabs-extension
+  EXTENSION_DIR: extension
+  BUILD_DIR: build
+
 on:
   push:
     branches:
       - dev
+    tags:
+      - "v*"
+  pull_request:
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Create extension zip
+      - name: Validate manifest.json
         run: |
-          zip -r chrome-tabs-group-oz.zip . \
-            -x "*.git*" \
-            -x "node_modules/*" \
-            -x ".vscode/*" \
-            -x "tests/*" \
-            -x ".github/*" \
-            -x ".idea/*"
+          jq . ${EXTENSION_DIR}/manifest.json
+
+      - name: Extract extension version
+        id: manifest
+        run: |
+          VERSION=$(jq -r '.version' ${EXTENSION_DIR}/manifest.json)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Prepare build directory
+        run: |
+          mkdir ${BUILD_DIR}
+          cp -R ${EXTENSION_DIR}/* ${BUILD_DIR}/
+
+      - name: Create zip package
+        run: |
+          cd ${BUILD_DIR}
+          zip -r ../${EXTENSION_NAME}-${{ steps.manifest.outputs.version }}.zip . \
+            -x "*.DS_Store"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: chrome-tabs-group-oz
-          path: chrome-tabs-group-oz.zip
+          name: ${{ env.EXTENSION_NAME }}
+          path: ${{ env.EXTENSION_NAME }}-${{ steps.manifest.outputs.version }}.zip
 
+      - name: Create GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.EXTENSION_NAME }}-${{ steps.manifest.outputs.version }}.zip
