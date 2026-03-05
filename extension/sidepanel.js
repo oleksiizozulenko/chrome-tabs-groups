@@ -57,8 +57,10 @@ async function runAction(actionLabel, action) {
         setStatus("");
       }
     }, 900);
-  } catch {
-    setStatus(`${actionLabel} failed`);
+  } catch (error) {
+    const errorMessage = error?.message || "Unknown error";
+    console.error(`${actionLabel} failed`, error);
+    setStatus(`${actionLabel} failed: ${errorMessage}`);
   } finally {
     setBusyState(false);
   }
@@ -109,16 +111,16 @@ function createMoveControls(group, windows, currentWindowId) {
 
       const response = await sendMessage(MESSAGE_TYPES.moveGroup, {
         sourceWindowId: currentWindowId,
-        hostname: group.hostname,
+        groupName: group.groupName,
         targetWindowId: Number(select.value)
       });
 
       if (!response?.ok) {
-        throw new Error("Move failed");
+        throw new Error(response?.error || "Move failed");
       }
 
       await refresh();
-    }).catch(() => {});
+    });
   });
 
   if (!targets.length) {
@@ -174,15 +176,15 @@ function renderGroupRow(group, windows, currentWindowId) {
       runAction("Open group", async () => {
         const response = await sendMessage(MESSAGE_TYPES.openGroup, {
           windowId: currentWindowId,
-          hostname: group.hostname
+          groupName: group.groupName
         });
 
         if (!response?.ok) {
-          throw new Error("Open failed");
+          throw new Error(response?.error || "Open failed");
         }
 
         await refresh();
-      }).catch(() => {});
+      });
     })
   );
 
@@ -191,15 +193,15 @@ function renderGroupRow(group, windows, currentWindowId) {
       runAction("Toggle group", async () => {
         const response = await sendMessage(MESSAGE_TYPES.toggleGroup, {
           windowId: currentWindowId,
-          hostname: group.hostname
+          groupName: group.groupName
         });
 
         if (!response?.ok) {
-          throw new Error("Toggle failed");
+          throw new Error(response?.error || "Toggle failed");
         }
 
         await refresh();
-      }).catch(() => {});
+      });
     })
   );
 
@@ -208,16 +210,16 @@ function renderGroupRow(group, windows, currentWindowId) {
       runAction(group.pinned ? "Unpin group" : "Pin group", async () => {
         const response = await sendMessage(MESSAGE_TYPES.setPinned, {
           windowId: currentWindowId,
-          hostname: group.hostname,
+          groupName: group.groupName,
           pinned: !group.pinned
         });
 
         if (!response?.ok) {
-          throw new Error("Pin failed");
+          throw new Error(response?.error || "Pin failed");
         }
 
         await refresh();
-      }).catch(() => {});
+      });
     })
   );
 
@@ -259,11 +261,11 @@ function renderRulesList(rules) {
       runAction("Remove rule", async () => {
         const response = await sendMessage(MESSAGE_TYPES.removeManualGroupRule, { ruleId: rule.id });
         if (!response?.ok) {
-          throw new Error("Rule remove failed");
+          throw new Error(response?.error || "Rule remove failed");
         }
 
         await Promise.all([refresh(), refreshRules()]);
-      }).catch(() => {});
+      });
     });
 
     row.appendChild(text);
@@ -304,13 +306,13 @@ function setupRuleForm() {
       });
 
       if (!response?.ok) {
-        throw new Error("Rule add failed");
+        throw new Error(response?.error || "Rule add failed");
       }
 
       pathPrefixInput.value = "";
       groupNameInput.value = "";
       await Promise.all([refresh(), refreshRules()]);
-    }).catch(() => {});
+    });
   });
 }
 

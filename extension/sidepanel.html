@@ -28,8 +28,11 @@
       <section>
         <h2 class="section-title">Manual Groups</h2>
         <form id="rule-form" class="rule-form">
+          <label for="rule-hostname-or-url">Hostname or URL</label>
           <input id="rule-hostname-or-url" type="text" placeholder="Hostname or URL (e.g. bitbucket.org)" required />
+          <label for="rule-path-prefix">Path prefix (optional, default /)</label>
           <input id="rule-path-prefix" type="text" placeholder="Path prefix (optional, default /)" />
+          <label for="rule-group-name">Group name</label>
           <input id="rule-group-name" type="text" placeholder="Group name" required />
           <button type="submit">Add Rule</button>
         </form>

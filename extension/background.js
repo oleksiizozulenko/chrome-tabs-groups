@@ -23,7 +23,9 @@ const inMemoryState = {
   manualGroupRules: null,
   knownGroupNameByTabId: new Map(),
   groupOperationByKey: new Map(),
-  duplicateCleanupDoneByWindowId: new Set()
+  duplicateCleanupDoneByWindowId: new Set(),
+  reconcileTimerByWindowId: new Map(),
+  reconcileInFlightByWindowId: new Map()
 };
 
 function getGroupKey(windowId, hostname) {
@@ -129,24 +131,38 @@ async function getManualGroupRules() {
   const loaded = await chrome.storage.local.get(STORAGE_KEYS.manualGroupRules);
   const rawRules = Array.isArray(loaded[STORAGE_KEYS.manualGroupRules]) ? loaded[STORAGE_KEYS.manualGroupRules] : [];
 
-  inMemoryState.manualGroupRules = rawRules
-    .map((rule) => {
-      const hostname = rule?.hostname || "";
-      const groupName = normalizeGroupName(rule?.groupName);
-      const pathPrefix = normalizePathPrefix(rule?.pathPrefix);
+  const normalizedRules = [];
+  let needsSave = false;
 
-      if (!hostname || !groupName) {
-        return null;
-      }
+  for (const rule of rawRules) {
+    const hostname = rule?.hostname || "";
+    const groupName = normalizeGroupName(rule?.groupName);
+    const pathPrefix = normalizePathPrefix(rule?.pathPrefix);
 
-      return {
-        id: rule?.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        hostname,
-        pathPrefix,
-        groupName
-      };
-    })
-    .filter(Boolean);
+    if (!hostname || !groupName) {
+      needsSave = true;
+      continue;
+    }
+
+    let id = rule?.id;
+    if (!id) {
+      id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      needsSave = true;
+    }
+
+    normalizedRules.push({
+      id,
+      hostname,
+      pathPrefix,
+      groupName
+    });
+  }
+
+  inMemoryState.manualGroupRules = normalizedRules;
+
+  if (needsSave) {
+    await saveManualGroupRules();
+  }
 
   return inMemoryState.manualGroupRules;
 }
@@ -707,36 +723,39 @@ async function reconcileWindow(windowId) {
   }
 
   const tabs = await chrome.tabs.query({ windowId });
-  const byHostname = new Map();
+  const byGroupName = new Map();
+  const groupOperations = [];
 
   for (const tab of tabs) {
     if (tab.id == null || tab.incognito) {
       continue;
     }
 
-    const hostname = await getGroupNameFromTab(tab);
-    if (!hostname) {
+    const groupName = await getGroupNameFromTab(tab);
+    if (!groupName) {
       continue;
     }
 
-    inMemoryState.knownGroupNameByTabId.set(tab.id, hostname);
+    inMemoryState.knownGroupNameByTabId.set(tab.id, groupName);
 
-    if (!byHostname.has(hostname)) {
-      byHostname.set(hostname, []);
+    if (!byGroupName.has(groupName)) {
+      byGroupName.set(groupName, []);
     }
-    byHostname.get(hostname).push(tab);
-    await createOrUpdateGroupForTab(tab, hostname);
+    byGroupName.get(groupName).push(tab);
+    groupOperations.push(createOrUpdateGroupForTab(tab, groupName));
   }
+
+  await Promise.all(groupOperations);
 
   const records = await getGroupRecords();
   const touchedKeys = new Set();
 
-  for (const [hostname, hostTabs] of byHostname.entries()) {
-    const key = getGroupKey(windowId, hostname);
+  for (const [groupName, groupTabs] of byGroupName.entries()) {
+    const key = getGroupKey(windowId, groupName);
     touchedKeys.add(key);
     const existing = records[key] || {
       windowId,
-      hostname,
+      hostname: groupName,
       pinned: false,
       urls: [],
       lastActiveTabId: null,
@@ -745,14 +764,14 @@ async function reconcileWindow(windowId) {
       color: null
     };
 
-    const color = await getOrAssignColor(hostname);
-    const activeTab = hostTabs.find((tab) => tab.active);
+    const color = await getOrAssignColor(groupName);
+    const activeTab = groupTabs.find((tab) => tab.active);
 
     records[key] = {
       ...existing,
       windowId,
-      hostname,
-      urls: uniqueUrls(hostTabs.map((tab) => tab.url).filter(Boolean)),
+      hostname: groupName,
+      urls: uniqueUrls(groupTabs.map((tab) => tab.url).filter(Boolean)),
       toggledOff: false,
       color,
       lastActiveTabId: activeTab ? activeTab.id : existing.lastActiveTabId
@@ -784,7 +803,35 @@ async function reconcileAllNormalWindows() {
   }
 }
 
-async function getCurrentActiveHostname(windowId) {
+function scheduleReconcileWindow(windowId, delay = 120) {
+  if (windowId == null || windowId === chrome.windows.WINDOW_ID_NONE) {
+    return;
+  }
+
+  if (inMemoryState.reconcileTimerByWindowId.has(windowId)) {
+    clearTimeout(inMemoryState.reconcileTimerByWindowId.get(windowId));
+  }
+
+  const timer = setTimeout(() => {
+    inMemoryState.reconcileTimerByWindowId.delete(windowId);
+
+    const current = inMemoryState.reconcileInFlightByWindowId.get(windowId) || Promise.resolve();
+    const next = current
+      .catch(() => {})
+      .then(() => reconcileWindow(windowId))
+      .finally(() => {
+        if (inMemoryState.reconcileInFlightByWindowId.get(windowId) === next) {
+          inMemoryState.reconcileInFlightByWindowId.delete(windowId);
+        }
+      });
+
+    inMemoryState.reconcileInFlightByWindowId.set(windowId, next);
+  }, delay);
+
+  inMemoryState.reconcileTimerByWindowId.set(windowId, timer);
+}
+
+async function getCurrentActiveGroupName(windowId) {
   const activeTabs = await chrome.tabs.query({ windowId, active: true });
   const activeTab = activeTabs[0];
   if (!activeTab) {
@@ -793,17 +840,19 @@ async function getCurrentActiveHostname(windowId) {
   return getGroupNameFromTab(activeTab);
 }
 
-function toGroupItem(record, tabCount, activeHostname) {
+function toGroupItem(record, tabCount, activeGroupName) {
+  const groupName = record.hostname;
   const isClosed = Boolean(record.toggledOff) && tabCount === 0;
   return {
     windowId: record.windowId,
-    hostname: record.hostname,
+    groupName,
+    hostname: groupName,
     pinned: Boolean(record.pinned),
     toggledOff: isClosed,
     mruAt: Number(record.mruAt || 0),
     tabCount,
     color: record.color || "grey",
-    active: activeHostname === record.hostname
+    active: activeGroupName === groupName
   };
 }
 
@@ -812,28 +861,29 @@ async function getSidePanelData(windowId) {
 
   const records = await getGroupRecords();
   const tabs = await chrome.tabs.query({ windowId });
-  const tabCountByHostname = new Map();
+  const tabCountByGroupName = new Map();
 
   for (const tab of tabs) {
-    const hostname = await getGroupNameFromTab(tab);
-    if (!hostname) {
+    const groupName = await getGroupNameFromTab(tab);
+    if (!groupName) {
       continue;
     }
-    tabCountByHostname.set(hostname, (tabCountByHostname.get(hostname) || 0) + 1);
+    tabCountByGroupName.set(groupName, (tabCountByGroupName.get(groupName) || 0) + 1);
   }
 
   const windowRecords = Object.values(records).filter((record) => record.windowId === windowId);
-  const activeHostname = await getCurrentActiveHostname(windowId);
+  const activeGroupName = await getCurrentActiveGroupName(windowId);
   const pinned = [];
   const recent = [];
 
   for (const record of windowRecords) {
-    const tabCount = tabCountByHostname.get(record.hostname) || 0;
+    const groupName = record.hostname;
+    const tabCount = tabCountByGroupName.get(groupName) || 0;
     if (tabCount > 0 && record.toggledOff) {
-      await upsertGroupRecord(windowId, record.hostname, { toggledOff: false });
+      await upsertGroupRecord(windowId, groupName, { toggledOff: false });
       record.toggledOff = false;
     }
-    const item = toGroupItem(record, tabCount, activeHostname);
+    const item = toGroupItem(record, tabCount, activeGroupName);
     if (record.pinned) {
       pinned.push(item);
     } else {
@@ -851,7 +901,8 @@ async function getSidePanelData(windowId) {
 
   return {
     windowId,
-    activeHostname,
+    activeGroupName,
+    activeHostname: activeGroupName,
     pinned,
     recent: recent.slice(0, 4),
     windows,
@@ -888,7 +939,7 @@ async function handlePotentialHostnameChange(tabId, changeInfo, tab) {
   }
 
   try {
-    await reconcileWindow(tab.windowId);
+    scheduleReconcileWindow(tab.windowId);
   } catch {
   }
 }
@@ -929,7 +980,7 @@ chrome.tabs.onReplaced.addListener(async (addedTabId) => {
 
 chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
   inMemoryState.knownGroupNameByTabId.delete(tabId);
-  reconcileWindow(removeInfo.windowId).catch(() => {});
+  scheduleReconcileWindow(removeInfo.windowId);
 });
 
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
@@ -940,7 +991,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
       return;
     }
     await touchGroupUsage(tab.windowId, hostname, tab.id);
-    await reconcileWindow(tab.windowId);
+    scheduleReconcileWindow(tab.windowId);
   } catch {
   }
 });
@@ -949,7 +1000,7 @@ chrome.tabGroups.onRemoved.addListener((group) => {
   if (group.windowId == null) {
     return;
   }
-  reconcileWindow(group.windowId).catch(() => {});
+  scheduleReconcileWindow(group.windowId);
 });
 
 chrome.tabGroups.onUpdated.addListener((group) => {
@@ -959,11 +1010,16 @@ chrome.tabGroups.onUpdated.addListener((group) => {
   if (group.title) {
     upsertGroupRecord(group.windowId, group.title, { toggledOff: false }).catch(() => {});
   }
-  reconcileWindow(group.windowId).catch(() => {});
+  scheduleReconcileWindow(group.windowId);
 });
 
 chrome.windows.onRemoved.addListener(async (windowId) => {
   inMemoryState.duplicateCleanupDoneByWindowId.delete(windowId);
+  if (inMemoryState.reconcileTimerByWindowId.has(windowId)) {
+    clearTimeout(inMemoryState.reconcileTimerByWindowId.get(windowId));
+    inMemoryState.reconcileTimerByWindowId.delete(windowId);
+  }
+  inMemoryState.reconcileInFlightByWindowId.delete(windowId);
   const records = await getGroupRecords();
   for (const key of Object.keys(records)) {
     if (records[key]?.windowId === windowId) {
@@ -975,37 +1031,68 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
+    const requireWindowId = (value) => Number.isInteger(value) && value >= 0;
+    const requireGroupName = (value) => typeof value === "string" && value.trim().length > 0;
+
     if (!message || !message.type) {
       sendResponse({ ok: false, error: "Invalid message" });
       return;
     }
 
     if (message.type === MESSAGE_TYPES.getSidePanelData) {
+      if (!requireWindowId(message.windowId)) {
+        sendResponse({ ok: false, error: "windowId must be a non-negative integer" });
+        return;
+      }
       const data = await getSidePanelData(message.windowId);
       sendResponse({ ok: true, data });
       return;
     }
 
     if (message.type === MESSAGE_TYPES.openGroup) {
-      await openGroup(message.windowId, message.hostname);
+      const groupName = message.groupName || message.hostname;
+      if (!requireWindowId(message.windowId) || !requireGroupName(groupName)) {
+        sendResponse({ ok: false, error: "windowId and groupName are required" });
+        return;
+      }
+      await openGroup(message.windowId, groupName);
       sendResponse({ ok: true });
       return;
     }
 
     if (message.type === MESSAGE_TYPES.toggleGroup) {
-      await toggleGroup(message.windowId, message.hostname);
+      const groupName = message.groupName || message.hostname;
+      if (!requireWindowId(message.windowId) || !requireGroupName(groupName)) {
+        sendResponse({ ok: false, error: "windowId and groupName are required" });
+        return;
+      }
+      await toggleGroup(message.windowId, groupName);
       sendResponse({ ok: true });
       return;
     }
 
     if (message.type === MESSAGE_TYPES.setPinned) {
-      await setPinned(message.windowId, message.hostname, message.pinned);
+      const groupName = message.groupName || message.hostname;
+      if (!requireWindowId(message.windowId) || !requireGroupName(groupName) || typeof message.pinned !== "boolean") {
+        sendResponse({ ok: false, error: "windowId, groupName, and pinned(boolean) are required" });
+        return;
+      }
+      await setPinned(message.windowId, groupName, message.pinned);
       sendResponse({ ok: true });
       return;
     }
 
     if (message.type === MESSAGE_TYPES.moveGroup) {
-      await moveGroup(message.sourceWindowId, message.hostname, message.targetWindowId);
+      const groupName = message.groupName || message.hostname;
+      if (
+        !requireWindowId(message.sourceWindowId) ||
+        !requireWindowId(message.targetWindowId) ||
+        !requireGroupName(groupName)
+      ) {
+        sendResponse({ ok: false, error: "sourceWindowId, targetWindowId, and groupName are required" });
+        return;
+      }
+      await moveGroup(message.sourceWindowId, groupName, message.targetWindowId);
       sendResponse({ ok: true });
       return;
     }
@@ -1017,6 +1104,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     if (message.type === MESSAGE_TYPES.addManualGroupRule) {
+      if (
+        typeof message.hostnameOrUrl !== "string" ||
+        typeof message.groupName !== "string" ||
+        (message.pathPrefix != null && typeof message.pathPrefix !== "string")
+      ) {
+        sendResponse({ ok: false, error: "hostnameOrUrl and groupName are required strings" });
+        return;
+      }
       const rules = await addManualGroupRule({
         hostnameOrUrl: message.hostnameOrUrl,
         pathPrefix: message.pathPrefix,
@@ -1028,6 +1123,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     if (message.type === MESSAGE_TYPES.removeManualGroupRule) {
+      if (!requireGroupName(message.ruleId)) {
+        sendResponse({ ok: false, error: "ruleId is required" });
+        return;
+      }
       const rules = await removeManualGroupRule(message.ruleId);
       await reconcileAllNormalWindows();
       sendResponse({ ok: true, rules });
