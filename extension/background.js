@@ -28,8 +28,16 @@ const inMemoryState = {
   reconcileInFlightByWindowId: new Map()
 };
 
-function getGroupKey(windowId, hostname) {
-  return `${windowId}::${hostname}`;
+function getGroupKey(windowId, groupName) {
+  return `${windowId}::${groupName}`;
+}
+
+function getRecordGroupName(record) {
+  if (!record) {
+    return "";
+  }
+
+  return normalizeGroupName(record.groupName || record.hostname || "");
 }
 
 function isGroupableUrl(urlValue) {
@@ -322,7 +330,45 @@ async function getGroupRecords() {
   }
 
   const loaded = await chrome.storage.local.get(STORAGE_KEYS.groupRecords);
-  inMemoryState.groupRecords = loaded[STORAGE_KEYS.groupRecords] || {};
+  const rawRecords = loaded[STORAGE_KEYS.groupRecords] || {};
+  const normalizedRecords = {};
+  let needsSave = false;
+
+  for (const [rawKey, rawRecord] of Object.entries(rawRecords)) {
+    if (!rawRecord || !Number.isInteger(rawRecord.windowId)) {
+      needsSave = true;
+      continue;
+    }
+
+    const groupName = getRecordGroupName(rawRecord);
+    if (!groupName) {
+      needsSave = true;
+      continue;
+    }
+
+    const key = getGroupKey(rawRecord.windowId, groupName);
+    normalizedRecords[key] = {
+      windowId: rawRecord.windowId,
+      groupName,
+      pinned: Boolean(rawRecord.pinned),
+      urls: uniqueUrls(Array.isArray(rawRecord.urls) ? rawRecord.urls : []),
+      lastActiveTabId: rawRecord.lastActiveTabId ?? null,
+      mruAt: Number(rawRecord.mruAt || 0),
+      toggledOff: Boolean(rawRecord.toggledOff),
+      color: rawRecord.color || null
+    };
+
+    if (key !== rawKey || rawRecord.groupName !== groupName || "hostname" in rawRecord) {
+      needsSave = true;
+    }
+  }
+
+  inMemoryState.groupRecords = normalizedRecords;
+
+  if (needsSave) {
+    await saveGroupRecords();
+  }
+
   return inMemoryState.groupRecords;
 }
 
@@ -334,17 +380,17 @@ async function saveGroupRecords() {
   await chrome.storage.local.set({ [STORAGE_KEYS.groupRecords]: inMemoryState.groupRecords });
 }
 
-async function getGroupRecord(windowId, hostname) {
+async function getGroupRecord(windowId, groupName) {
   const records = await getGroupRecords();
-  return records[getGroupKey(windowId, hostname)] || null;
+  return records[getGroupKey(windowId, groupName)] || null;
 }
 
-async function upsertGroupRecord(windowId, hostname, updates) {
+async function upsertGroupRecord(windowId, groupName, updates) {
   const records = await getGroupRecords();
-  const key = getGroupKey(windowId, hostname);
+  const key = getGroupKey(windowId, groupName);
   const existing = records[key] || {
     windowId,
-    hostname,
+    groupName,
     pinned: false,
     urls: [],
     lastActiveTabId: null,
@@ -358,9 +404,9 @@ async function upsertGroupRecord(windowId, hostname, updates) {
   return records[key];
 }
 
-async function deleteGroupRecord(windowId, hostname) {
+async function deleteGroupRecord(windowId, groupName) {
   const records = await getGroupRecords();
-  const key = getGroupKey(windowId, hostname);
+  const key = getGroupKey(windowId, groupName);
   if (!records[key]) {
     return;
   }
@@ -402,12 +448,12 @@ async function getGroupForHostname(windowId, hostname) {
   return groups.find((group) => group.title === hostname) || null;
 }
 
-async function createOrUpdateGroupForTab(tab, hostname) {
+async function createOrUpdateGroupForTab(tab, groupName) {
   if (!tab || tab.id == null || tab.windowId == null || tab.incognito) {
     return;
   }
 
-  const groupKey = getGroupKey(tab.windowId, hostname);
+  const groupKey = getGroupKey(tab.windowId, groupName);
 
   await runSerializedGroupOperation(groupKey, async () => {
     let latestTab;
@@ -421,27 +467,27 @@ async function createOrUpdateGroupForTab(tab, hostname) {
       return;
     }
 
-    const latestHostname = await getGroupNameFromTab(latestTab);
-    if (latestHostname !== hostname) {
+    const latestGroupName = await getGroupNameFromTab(latestTab);
+    if (latestGroupName !== groupName) {
       return;
     }
 
     const isActive = Boolean(latestTab.active);
-    const color = await getOrAssignColor(hostname);
-    let matchingGroup = await getGroupForHostname(latestTab.windowId, hostname);
+    const color = await getOrAssignColor(groupName);
+    let matchingGroup = await getGroupForHostname(latestTab.windowId, groupName);
 
     if (!matchingGroup) {
       const createdGroupId = await chrome.tabs.group({ tabIds: [latestTab.id] });
-      await chrome.tabGroups.update(createdGroupId, { title: hostname, color, collapsed: false });
+      await chrome.tabGroups.update(createdGroupId, { title: groupName, color, collapsed: false });
       if (isActive) {
         await chrome.tabs.update(latestTab.id, { active: true });
       }
       return;
     }
 
-    if (matchingGroup.color !== color || matchingGroup.title !== hostname || matchingGroup.collapsed) {
-      await chrome.tabGroups.update(matchingGroup.id, { title: hostname, color, collapsed: false });
-      matchingGroup = await getGroupForHostname(latestTab.windowId, hostname);
+    if (matchingGroup.color !== color || matchingGroup.title !== groupName || matchingGroup.collapsed) {
+      await chrome.tabGroups.update(matchingGroup.id, { title: groupName, color, collapsed: false });
+      matchingGroup = await getGroupForHostname(latestTab.windowId, groupName);
     }
 
     if (!matchingGroup) {
@@ -469,37 +515,37 @@ async function createOrUpdateGroupForTab(tab, hostname) {
   });
 }
 
-async function getOpenTabsForHostname(windowId, hostname) {
-  const group = await getGroupForHostname(windowId, hostname);
+async function getOpenTabsForGroupName(windowId, groupName) {
+  const group = await getGroupForHostname(windowId, groupName);
   if (!group) {
     return [];
   }
   return chrome.tabs.query({ windowId, groupId: group.id });
 }
 
-async function touchGroupUsage(windowId, hostname, lastActiveTabId) {
+async function touchGroupUsage(windowId, groupName, lastActiveTabId) {
   const updates = { mruAt: Date.now() };
   if (lastActiveTabId != null) {
     updates.lastActiveTabId = lastActiveTabId;
   }
-  await upsertGroupRecord(windowId, hostname, updates);
+  await upsertGroupRecord(windowId, groupName, updates);
 }
 
-async function activateByRule(windowId, hostname, lastActiveTabId) {
+async function activateByRule(windowId, groupName, lastActiveTabId) {
   if (lastActiveTabId != null) {
     try {
       const tab = await chrome.tabs.get(lastActiveTabId);
-      const groupName = await getGroupNameFromTab(tab);
-      if (tab && tab.windowId === windowId && groupName === hostname) {
+      const tabGroupName = await getGroupNameFromTab(tab);
+      if (tab && tab.windowId === windowId && tabGroupName === groupName) {
         await chrome.tabs.update(tab.id, { active: true });
-        await upsertGroupRecord(windowId, hostname, { lastActiveTabId: tab.id });
+        await upsertGroupRecord(windowId, groupName, { lastActiveTabId: tab.id });
         return tab.id;
       }
     } catch {
     }
   }
 
-  const openTabs = await getOpenTabsForHostname(windowId, hostname);
+  const openTabs = await getOpenTabsForGroupName(windowId, groupName);
   if (!openTabs.length) {
     return null;
   }
@@ -507,12 +553,12 @@ async function activateByRule(windowId, hostname, lastActiveTabId) {
   openTabs.sort((a, b) => a.index - b.index);
   const firstTab = openTabs[0];
   await chrome.tabs.update(firstTab.id, { active: true });
-  await upsertGroupRecord(windowId, hostname, { lastActiveTabId: firstTab.id });
+  await upsertGroupRecord(windowId, groupName, { lastActiveTabId: firstTab.id });
   return firstTab.id;
 }
 
-async function restoreGroupTabs(windowId, hostname) {
-  const record = (await getGroupRecord(windowId, hostname)) || (await upsertGroupRecord(windowId, hostname, {}));
+async function restoreGroupTabs(windowId, groupName) {
+  const record = (await getGroupRecord(windowId, groupName)) || (await upsertGroupRecord(windowId, groupName, {}));
   const urls = uniqueUrls(record.urls || []);
   if (!urls.length) {
     return [];
@@ -525,94 +571,94 @@ async function restoreGroupTabs(windowId, hostname) {
   }
 
   for (const created of createdTabs) {
-    await createOrUpdateGroupForTab(created, hostname);
+    await createOrUpdateGroupForTab(created, groupName);
   }
 
-  return getOpenTabsForHostname(windowId, hostname);
+  return getOpenTabsForGroupName(windowId, groupName);
 }
 
-async function openGroup(windowId, hostname) {
-  let record = await getGroupRecord(windowId, hostname);
+async function openGroup(windowId, groupName) {
+  let record = await getGroupRecord(windowId, groupName);
   if (!record) {
-    record = await upsertGroupRecord(windowId, hostname, {});
+    record = await upsertGroupRecord(windowId, groupName, {});
   }
 
-  let openTabs = await getOpenTabsForHostname(windowId, hostname);
+  let openTabs = await getOpenTabsForGroupName(windowId, groupName);
   if (!openTabs.length) {
-    openTabs = await restoreGroupTabs(windowId, hostname);
+    openTabs = await restoreGroupTabs(windowId, groupName);
   }
 
-  await upsertGroupRecord(windowId, hostname, { toggledOff: false });
-  const activatedTabId = await activateByRule(windowId, hostname, record.lastActiveTabId);
-  await touchGroupUsage(windowId, hostname, activatedTabId);
+  await upsertGroupRecord(windowId, groupName, { toggledOff: false });
+  const activatedTabId = await activateByRule(windowId, groupName, record.lastActiveTabId);
+  await touchGroupUsage(windowId, groupName, activatedTabId);
 }
 
-async function toggleGroupOff(windowId, hostname) {
-  const openTabs = await getOpenTabsForHostname(windowId, hostname);
+async function toggleGroupOff(windowId, groupName) {
+  const openTabs = await getOpenTabsForGroupName(windowId, groupName);
   const openUrls = uniqueUrls(openTabs.map((tab) => tab.url).filter(Boolean));
-  const record = await getGroupRecord(windowId, hostname);
+  const record = await getGroupRecord(windowId, groupName);
   const urls = uniqueUrls([...(record?.urls || []), ...openUrls]);
 
   if (openTabs.length) {
     await chrome.tabs.remove(openTabs.map((tab) => tab.id));
   }
 
-  await upsertGroupRecord(windowId, hostname, {
+  await upsertGroupRecord(windowId, groupName, {
     urls,
     toggledOff: true
   });
-  await touchGroupUsage(windowId, hostname, record?.lastActiveTabId || null);
+  await touchGroupUsage(windowId, groupName, record?.lastActiveTabId || null);
 }
 
-async function toggleGroup(windowId, hostname) {
-  const record = await getGroupRecord(windowId, hostname);
-  const openTabs = await getOpenTabsForHostname(windowId, hostname);
+async function toggleGroup(windowId, groupName) {
+  const record = await getGroupRecord(windowId, groupName);
+  const openTabs = await getOpenTabsForGroupName(windowId, groupName);
 
   if (record?.toggledOff) {
     if (openTabs.length) {
       const mergedUrls = uniqueUrls([...(record.urls || []), ...openTabs.map((tab) => tab.url).filter(Boolean)]);
-      await upsertGroupRecord(windowId, hostname, {
+      await upsertGroupRecord(windowId, groupName, {
         toggledOff: false,
         urls: mergedUrls
       });
-      const activatedTabId = await activateByRule(windowId, hostname, record.lastActiveTabId);
-      await touchGroupUsage(windowId, hostname, activatedTabId);
+      const activatedTabId = await activateByRule(windowId, groupName, record.lastActiveTabId);
+      await touchGroupUsage(windowId, groupName, activatedTabId);
       return;
     }
 
-    await openGroup(windowId, hostname);
+    await openGroup(windowId, groupName);
     return;
   }
 
   if (openTabs.length) {
-    await toggleGroupOff(windowId, hostname);
+    await toggleGroupOff(windowId, groupName);
     return;
   }
 
-  await openGroup(windowId, hostname);
+  await openGroup(windowId, groupName);
 }
 
-async function setPinned(windowId, hostname, pinned) {
-  await upsertGroupRecord(windowId, hostname, { pinned: Boolean(pinned) });
+async function setPinned(windowId, groupName, pinned) {
+  await upsertGroupRecord(windowId, groupName, { pinned: Boolean(pinned) });
 }
 
 async function mergeUrls(targetUrls, sourceUrls) {
   return uniqueUrls([...(targetUrls || []), ...(sourceUrls || [])]);
 }
 
-async function moveGroup(sourceWindowId, hostname, targetWindowId) {
+async function moveGroup(sourceWindowId, groupName, targetWindowId) {
   if (sourceWindowId === targetWindowId) {
     return;
   }
 
-  const sourceRecord = await getGroupRecord(sourceWindowId, hostname);
-  const sourceOpenTabs = await getOpenTabsForHostname(sourceWindowId, hostname);
+  const sourceRecord = await getGroupRecord(sourceWindowId, groupName);
+  const sourceOpenTabs = await getOpenTabsForGroupName(sourceWindowId, groupName);
   const sourceOpenUrls = uniqueUrls(sourceOpenTabs.map((tab) => tab.url).filter(Boolean));
   const sourceUrls = await mergeUrls(sourceRecord?.urls || [], sourceOpenUrls);
 
-  const targetRecord = await getGroupRecord(targetWindowId, hostname);
+  const targetRecord = await getGroupRecord(targetWindowId, groupName);
   const targetMergedUrls = await mergeUrls(targetRecord?.urls || [], sourceUrls);
-  const color = await getOrAssignColor(hostname);
+  const color = await getOrAssignColor(groupName);
 
   if (sourceOpenTabs.length) {
     const tabIds = sourceOpenTabs.map((tab) => tab.id);
@@ -620,49 +666,49 @@ async function moveGroup(sourceWindowId, hostname, targetWindowId) {
     for (const tabId of tabIds) {
       try {
         const movedTab = await chrome.tabs.get(tabId);
-        await createOrUpdateGroupForTab(movedTab, hostname);
+        await createOrUpdateGroupForTab(movedTab, groupName);
       } catch {
       }
     }
   }
 
-  await upsertGroupRecord(targetWindowId, hostname, {
+  await upsertGroupRecord(targetWindowId, groupName, {
     pinned: Boolean(sourceRecord?.pinned || targetRecord?.pinned),
     urls: targetMergedUrls,
     toggledOff: false,
     color
   });
 
-  await touchGroupUsage(targetWindowId, hostname, null);
-  await deleteGroupRecord(sourceWindowId, hostname);
+  await touchGroupUsage(targetWindowId, groupName, null);
+  await deleteGroupRecord(sourceWindowId, groupName);
   await reconcileWindow(sourceWindowId);
   await reconcileWindow(targetWindowId);
 }
 
-async function mergeDuplicateHostnameGroups(windowId) {
+async function mergeDuplicateGroupNameGroups(windowId) {
   const tabs = await chrome.tabs.query({ windowId });
-  const groupedTabsByHostname = new Map();
+  const groupedTabsByGroupName = new Map();
 
   for (const tab of tabs) {
     if (tab.id == null || tab.groupId == null || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) {
       continue;
     }
 
-    const hostname = await getGroupNameFromTab(tab);
-    if (!hostname) {
+    const groupName = await getGroupNameFromTab(tab);
+    if (!groupName) {
       continue;
     }
 
-    if (!groupedTabsByHostname.has(hostname)) {
-      groupedTabsByHostname.set(hostname, []);
+    if (!groupedTabsByGroupName.has(groupName)) {
+      groupedTabsByGroupName.set(groupName, []);
     }
-    groupedTabsByHostname.get(hostname).push(tab);
+    groupedTabsByGroupName.get(groupName).push(tab);
   }
 
-  for (const [hostname, hostnameTabs] of groupedTabsByHostname.entries()) {
+  for (const [groupName, groupTabs] of groupedTabsByGroupName.entries()) {
     const tabsByGroupId = new Map();
 
-    for (const tab of hostnameTabs) {
+    for (const tab of groupTabs) {
       if (!tabsByGroupId.has(tab.groupId)) {
         tabsByGroupId.set(tab.groupId, []);
       }
@@ -693,9 +739,9 @@ async function mergeDuplicateHostnameGroups(windowId) {
       }
     }
 
-    const color = await getOrAssignColor(hostname);
+    const color = await getOrAssignColor(groupName);
     try {
-      await chrome.tabGroups.update(targetGroupId, { title: hostname, color, collapsed: false });
+      await chrome.tabGroups.update(targetGroupId, { title: groupName, color, collapsed: false });
     } catch {
     }
   }
@@ -718,7 +764,7 @@ async function reconcileWindow(windowId) {
   }
 
   if (!inMemoryState.duplicateCleanupDoneByWindowId.has(windowId)) {
-    await mergeDuplicateHostnameGroups(windowId);
+    await mergeDuplicateGroupNameGroups(windowId);
     inMemoryState.duplicateCleanupDoneByWindowId.add(windowId);
   }
 
@@ -745,7 +791,7 @@ async function reconcileWindow(windowId) {
     groupOperations.push(createOrUpdateGroupForTab(tab, groupName));
   }
 
-  await Promise.all(groupOperations);
+  await Promise.allSettled(groupOperations);
 
   const records = await getGroupRecords();
   const touchedKeys = new Set();
@@ -755,7 +801,7 @@ async function reconcileWindow(windowId) {
     touchedKeys.add(key);
     const existing = records[key] || {
       windowId,
-      hostname: groupName,
+      groupName,
       pinned: false,
       urls: [],
       lastActiveTabId: null,
@@ -770,7 +816,7 @@ async function reconcileWindow(windowId) {
     records[key] = {
       ...existing,
       windowId,
-      hostname: groupName,
+      groupName,
       urls: uniqueUrls(groupTabs.map((tab) => tab.url).filter(Boolean)),
       toggledOff: false,
       color,
@@ -841,7 +887,7 @@ async function getCurrentActiveGroupName(windowId) {
 }
 
 function toGroupItem(record, tabCount, activeGroupName) {
-  const groupName = record.hostname;
+  const groupName = getRecordGroupName(record);
   const isClosed = Boolean(record.toggledOff) && tabCount === 0;
   return {
     windowId: record.windowId,
@@ -877,7 +923,11 @@ async function getSidePanelData(windowId) {
   const recent = [];
 
   for (const record of windowRecords) {
-    const groupName = record.hostname;
+    const groupName = getRecordGroupName(record);
+    if (!groupName) {
+      continue;
+    }
+
     const tabCount = tabCountByGroupName.get(groupName) || 0;
     if (tabCount > 0 && record.toggledOff) {
       await upsertGroupRecord(windowId, groupName, { toggledOff: false });
@@ -891,7 +941,7 @@ async function getSidePanelData(windowId) {
     }
   }
 
-  pinned.sort((a, b) => a.hostname.localeCompare(b.hostname));
+  pinned.sort((a, b) => a.groupName.localeCompare(b.groupName));
   recent.sort((a, b) => b.mruAt - a.mruAt);
 
   const allWindows = await chrome.windows.getAll();
@@ -910,31 +960,32 @@ async function getSidePanelData(windowId) {
   };
 }
 
-async function handlePotentialHostnameChange(tabId, changeInfo, tab) {
+async function handlePotentialGroupNameChange(tabId, changeInfo, tab) {
   if (!tab || tab.id == null || tab.windowId == null || tab.incognito) {
     return;
   }
 
-  const hostname =
+  const groupName =
     (await resolveGroupNameFromUrl(changeInfo.url)) ||
     (await resolveGroupNameFromUrl(changeInfo.pendingUrl)) ||
     (await getGroupNameFromTab(tab));
-  if (!hostname) {
+  if (!groupName) {
     return;
   }
 
-  const previousHostname = inMemoryState.knownGroupNameByTabId.get(tabId);
-  inMemoryState.knownGroupNameByTabId.set(tabId, hostname);
+  const previousGroupName = inMemoryState.knownGroupNameByTabId.get(tabId);
+  inMemoryState.knownGroupNameByTabId.set(tabId, groupName);
 
-  const shouldGroupNow = previousHostname !== hostname || Boolean(changeInfo.url) || Boolean(changeInfo.pendingUrl) || changeInfo.status === "complete";
+  const shouldGroupNow =
+    previousGroupName !== groupName || Boolean(changeInfo.url) || Boolean(changeInfo.pendingUrl) || changeInfo.status === "complete";
   if (!shouldGroupNow) {
     return;
   }
 
-  await upsertGroupRecord(tab.windowId, hostname, { toggledOff: false });
+  await upsertGroupRecord(tab.windowId, groupName, { toggledOff: false });
 
   try {
-    await createOrUpdateGroupForTab(tab, hostname);
+    await createOrUpdateGroupForTab(tab, groupName);
   } catch {
   }
 
@@ -953,17 +1004,17 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  handlePotentialHostnameChange(tabId, changeInfo, tab).catch(() => {});
+  handlePotentialGroupNameChange(tabId, changeInfo, tab).catch(() => {});
 });
 
 chrome.tabs.onCreated.addListener((tab) => {
-  handlePotentialHostnameChange(tab.id, { pendingUrl: tab.pendingUrl, url: tab.url, status: tab.status }, tab).catch(() => {});
+  handlePotentialGroupNameChange(tab.id, { pendingUrl: tab.pendingUrl, url: tab.url, status: tab.status }, tab).catch(() => {});
 });
 
 chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
   try {
     const tab = await chrome.tabs.get(tabId);
-    await handlePotentialHostnameChange(tabId, { pendingUrl: tab.pendingUrl, url: tab.url, status: tab.status }, tab);
+    await handlePotentialGroupNameChange(tabId, { pendingUrl: tab.pendingUrl, url: tab.url, status: tab.status }, tab);
     await reconcileWindow(attachInfo.newWindowId);
     await reconcileWindow(attachInfo.oldWindowId);
   } catch {
@@ -973,7 +1024,7 @@ chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
 chrome.tabs.onReplaced.addListener(async (addedTabId) => {
   try {
     const tab = await chrome.tabs.get(addedTabId);
-    await handlePotentialHostnameChange(addedTabId, { pendingUrl: tab.pendingUrl, url: tab.url, status: tab.status }, tab);
+    await handlePotentialGroupNameChange(addedTabId, { pendingUrl: tab.pendingUrl, url: tab.url, status: tab.status }, tab);
   } catch {
   }
 });
@@ -986,11 +1037,11 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
-    const hostname = await getGroupNameFromTab(tab);
-    if (!hostname || tab.windowId == null) {
+    const groupName = await getGroupNameFromTab(tab);
+    if (!groupName || tab.windowId == null) {
       return;
     }
-    await touchGroupUsage(tab.windowId, hostname, tab.id);
+    await touchGroupUsage(tab.windowId, groupName, tab.id);
     scheduleReconcileWindow(tab.windowId);
   } catch {
   }

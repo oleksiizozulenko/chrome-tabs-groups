@@ -144,10 +144,11 @@ function renderGroupRow(group, windows, currentWindowId) {
   const title = document.createElement("div");
   title.className = "group-title";
 
+  const groupName = group.groupName || group.hostname || "";
   const hostname = document.createElement("div");
   hostname.className = "group-hostname";
-  hostname.title = group.hostname;
-  hostname.textContent = group.hostname;
+  hostname.title = groupName;
+  hostname.textContent = groupName;
 
   const badge = document.createElement("span");
   badge.className = "badge";
