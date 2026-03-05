@@ -348,13 +348,18 @@ async function getGroupRecords() {
     }
 
     const key = getGroupKey(rawRecord.windowId, groupName);
+    const lastActiveTabId = Number.isInteger(rawRecord.lastActiveTabId)
+      ? rawRecord.lastActiveTabId
+      : null;
+    const rawMruAt = Number(rawRecord.mruAt);
+    const mruAt = Number.isFinite(rawMruAt) ? rawMruAt : 0;
     normalizedRecords[key] = {
       windowId: rawRecord.windowId,
       groupName,
       pinned: Boolean(rawRecord.pinned),
       urls: uniqueUrls(Array.isArray(rawRecord.urls) ? rawRecord.urls : []),
-      lastActiveTabId: rawRecord.lastActiveTabId ?? null,
-      mruAt: Number(rawRecord.mruAt || 0),
+      lastActiveTabId,
+      mruAt,
       toggledOff: Boolean(rawRecord.toggledOff),
       color: rawRecord.color || null
     };
